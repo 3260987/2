@@ -83,16 +83,18 @@ jobs:
           gh release create manual-podcast-releases --title "Manual Podcast Episodes Archive" --notes "Accumulated zip archives of manual podcast episodes." || true
           
           if [ "$IS_SPLIT" = "true" ]; then
-            echo "מעלה חלקים מפוצלים..."
+            echo "מעלה חלקים מפוצלים ל-Release..."
             for part in ${SAFE_SLUG}_part_*; do
               gh release upload manual-podcast-releases "$part" --clobber
             done
           else
+            echo "מעלה קובץ ZIP מלא ל-Release..."
             gh release upload manual-podcast-releases "$ZIP_NAME" --clobber
           fi
 
       - name: Remove large files locally before Git commit
         run: |
+          # מחיקת קבצים גדולים מתיקיית HEBREW כדי שלא יחרגו ממגבלת 100MB של Git
           find HEBREW/ -type f -size +45M -exec rm -f {} +
 
       - name: Save state and files to Git
@@ -101,7 +103,7 @@ jobs:
           git config user.email "bot@users.noreply.github.com"
           git add gitmanual_seen.json HEBREW/
           git diff --cached --quiet || (
-            git commit -m "Update manual podcast episodes and state" && 
+            git commit -m "Update manual podcast episodes state and cleaned folder" && 
             for i in {1..3}; do 
               git push && break || sleep 5; 
             done
