@@ -6,7 +6,7 @@ import feedparser
 import requests
 
 STATE_FILE = "gitmanual_seen.json"
-DOWNLOAD_DIR = "HEBREW"  # עודכן לתיקיית HEBREW התואמת
+DOWNLOAD_DIR = "HEBREW"
 
 ALLOWED_COUNTS = (5, 10, 15, 20, 30, 40, 100)
 DEFAULT_COUNT = 5
@@ -34,8 +34,34 @@ def save_state(state):
         json.dump(state, f, ensure_ascii=False, indent=2)
 
 def sanitize_filename(name):
-    cleaned = name.replace("[", "'").replace("]", "'").replace(":", "")
-    return re.sub(r'[\\/*?:"<>|]', "", cleaned).strip() or "podcast_episode"
+    """מסנן באופן מוחלט תווים אסורים במערכות קבצים ובשורת הפקודה כגון מרכאות, נקודתיים וכו'"""
+    # הסרת תווים אסורים: \ / * ? : " < > | וכן מרכאות יחידות וכפולות
+    cleaned = re.sub(r'[\\/*?:"<>|\'„“‘’`]', "", name)
+    # החלפת נקודתיים או תווים דומים ברווח או מקף במידת הצורך למניעת התנגשויות
+    cleaned = cleaned.replace(" - ", " - ").strip()
+    return cleaned or "podcast_episode"
+
+def transliterate_hebrew(text):
+    mapping = {
+        'א': 'a', 'ב': 'v', 'ג': 'g', 'ד': 'd', 'ה': 'h',
+        'ו': 'v', 'ז': 'z', 'ח': 'h', 'ט': 't', 'י': 'y',
+        'כ': 'k', 'ך': 'k', 'ל': 'l', 'מ': 'm', 'ם': 'm',
+        'נ': 'n', 'ן': 'n', 'ס': 's', 'ע': 'a', 'פ': 'p',
+        'ף': 'p', 'צ': 'ts', 'ץ': 'ts', 'ק': 'k', 'ר': 'r',
+        'ש': 'sh', 'ת': 't'
+    }
+    result = []
+    for char in text:
+        if char in mapping:
+            result.append(mapping[char])
+        elif 'a' <= char.lower() <= 'z' or '0' <= char <= '9':
+            result.append(char.lower())
+        elif char.isspace():
+            result.append('_')
+    
+    slug = "".join(result)
+    slug = re.sub(r'_+', '_', slug).strip('_')
+    return slug
 
 def download_podcast(url, filename, folder):
     os.makedirs(folder, exist_ok=True)
@@ -46,10 +72,10 @@ def download_podcast(url, filename, folder):
     
     for attempt in range(1, 4):
         try:
-            with requests.get(url, headers=headers, stream=True, timeout=300) as r:
+            with requests.get(url, headers=headers, stream=True, timeout=600) as r:
                 r.raise_for_status()
                 with open(path, "wb") as f:
-                    for chunk in r.iter_content(chunk_size=1024 * 512):
+                    for chunk in r.iter_content(chunk_size=1024 * 1024):
                         if chunk:
                             f.write(chunk)
             return path
@@ -78,11 +104,11 @@ def main():
 
     feed_title = parsed.feed.get("title", "Podcast")
     
-    words = feed_title.strip().split()[:2]
-    slug = "-".join(words).lower()
-    slug = re.sub(r'[^a-z0-9\-]', '', slug)
+    slug = transliterate_hebrew(feed_title[:20])
     if not slug:
-        slug = "podcast"
+        slug = "podcast_archive"
+    else:
+        slug = f"podcast_{slug}"
         
     with open("env_output.env", "w", encoding="utf-8") as env_file:
         env_file.write(f"PODCAST_SLUG={slug}\n")
