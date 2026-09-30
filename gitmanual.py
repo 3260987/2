@@ -35,9 +35,7 @@ def save_state(state):
 
 def sanitize_filename(name):
     """מסנן באופן מוחלט תווים אסורים במערכות קבצים ובשורת הפקודה כגון מרכאות, נקודתיים וכו'"""
-    # הסרת תווים אסורים: \ / * ? : " < > | וכן מרכאות יחידות וכפולות
     cleaned = re.sub(r'[\\/*?:"<>|\'„“‘’`]', "", name)
-    # החלפת נקודתיים או תווים דומים ברווח או מקף במידת הצורך למניעת התנגשויות
     cleaned = cleaned.replace(" - ", " - ").strip()
     return cleaned or "podcast_episode"
 
@@ -72,6 +70,7 @@ def download_podcast(url, filename, folder):
     
     for attempt in range(1, 4):
         try:
+            # מותאם לקבצים כבדים מאוד (מעל 100MB) עם timeout מורחב וגודל חבילה יציב
             with requests.get(url, headers=headers, stream=True, timeout=600) as r:
                 r.raise_for_status()
                 with open(path, "wb") as f:
