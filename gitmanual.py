@@ -6,7 +6,7 @@ import feedparser
 import requests
 
 STATE_FILE = "gitmanual_seen.json"
-DOWNLOAD_DIR = "podcasts_manual"
+DOWNLOAD_DIR = "HEBREW"  # עודכן לתיקיית HEBREW התואמת
 
 ALLOWED_COUNTS = (5, 10, 15, 20, 30, 40, 100)
 DEFAULT_COUNT = 5
@@ -65,7 +65,6 @@ def main():
         print("לא הוגדרה כתובת RSS.")
         return
 
-    # יצירת תיקיית ההורדות מראש למניעת שגיאות
     os.makedirs(DOWNLOAD_DIR, exist_ok=True)
     
     state = load_state()
