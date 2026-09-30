@@ -53,7 +53,9 @@ jobs:
         run: |
           mkdir -p HEBREW
           COUNT=$(find HEBREW/ -name "*.mp3" 2>/dev/null | wc -l)
-          SAFE_SLUG="${PODCAST_SLUG:-HEBREW}"
+          
+          # שימוש בשם באנגלית תקינה עבור קובץ ה-ZIP והחלוקה
+          SAFE_SLUG="podcast_archive"
           
           # יצירת קובץ ZIP מלא ראשוני
           FULL_ZIP_NAME="${SAFE_SLUG}_${COUNT}.zip"
@@ -86,7 +88,7 @@ jobs:
           
           if [ "$IS_SPLIT" = "true" ]; then
             echo "מעלה חלקים מפוצלים..."
-            for part in ${PODCAST_SLUG:-HEBREW}_part_*; do
+            for part in podcast_archive_part_*; do
               gh release upload manual-podcast-releases "$part" --clobber
             done
           else
