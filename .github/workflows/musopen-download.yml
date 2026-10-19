@@ -1,47 +1,151 @@
-- name: Download audio files from Musopen page
+name: Musopen Download
+
+on:
+  workflow_dispatch:
+    inputs:
+      musopen_url:
+        description: "Musopen page URL"
+        required: true
+
+jobs:
+  download:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Playwright
+        run: |
+          pip install playwright
+          playwright install --with-deps chromium
+
+      - name: Download audio files from Musopen page
         shell: bash
         env:
           TARGET_URL: ${{ inputs.musopen_url }}
+          DEBUG_DIR: ${{ github.workspace }}/debug
+          OUT_DIR: ${{ github.workspace }}/download
         run: |
-          set -e
-
-          cd download
-
           python3 - << 'EOF'
           import os
-          import urllib.request
-          import urllib.parse
           import re
-          import json
-          import urllib.error
+          import sys
+          import urllib.parse
 
-          url = os.environ['TARGET_URL']
-          req = urllib.request.Request(
-              url,
-              headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
+          from playwright.sync_api import sync_playwright
+
+          url = os.environ["TARGET_URL"]
+          debug_dir = os.environ["DEBUG_DIR"]
+          out_dir = os.environ["OUT_DIR"]
+          os.makedirs(debug_dir, exist_ok=True)
+          os.makedirs(out_dir, exist_ok=True)
+          os.chdir(out_dir)
+
+          UA = (
+              "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+              "(KHTML, like Gecko) Chrome/124.0 Safari/537.36"
+          )
+          EXT = r"(?:mp3|m4a|ogg|wav|flac)"
+          ext_re = re.compile(r"\." + EXT + r"(?:\?|$)", re.I)
+          html_re = re.compile(
+              r"https?:(?:\\?/){2}[^\"'\s<>\\]+?\." + EXT + r"(?:\?[^\"'\s<>\\]*)?",
+              re.I,
           )
 
-          try:
-              with urllib.request.urlopen(req) as response:
-                  html_content = response.read().decode('utf-8')
-          except Exception as e:
-              print(f"Error fetching URL: {e}")
-              exit(1)
+          found = {}
 
-          # חיפוש קישורים לקבצי MP3 בדף
-          mp3_links = re.findall(r'href="([^"]+\.mp3[^"]*)"', html_content)
-          
-          # ניקוי כתובות כפולות
-          mp3_links = list(set(mp3_links))
-          
-          print(f"Found {len(mp3_links)} MP3 links.")
+          with sync_playwright() as p:
+              browser = p.chromium.launch(headless=True)
+              ctx = browser.new_context(user_agent=UA, locale="en-US")
+              page = ctx.new_page()
 
-          for link in mp3_links:
-              full_url = urllib.parse.urljoin(url, link)
-              filename = os.path.basename(urllib.parse.urlparse(full_url).path)
-              print(f"Downloading: {filename}")
-              try:
-                  urllib.request.urlretrieve(full_url, filename)
-              except Exception as e:
-                  print(f"Failed to download {full_url}: {e}")
+              def on_response(r):
+                  ct = r.headers.get("content-type", "")
+                  if ct.startswith("audio/") or ext_re.search(r.url):
+                      found.setdefault(r.url, "network")
+
+              page.on("response", on_response)
+
+              resp = page.goto(url, wait_until="networkidle", timeout=90000)
+              print("HTTP status:", resp.status if resp else None)
+              page.wait_for_timeout(3000)
+
+              for _ in range(5):
+                  page.mouse.wheel(0, 3000)
+                  page.wait_for_timeout(500)
+
+              html = page.content()
+              print("Title:", page.title())
+              print("HTML length:", len(html))
+
+              page.screenshot(path=os.path.join(debug_dir, "page.png"), full_page=True)
+              with open(os.path.join(debug_dir, "page.html"), "w", encoding="utf-8") as f:
+                  f.write(html)
+
+              js = "els => els.flatMap(e => [e.href, e.src, e.currentSrc, e.dataset && e.dataset.src, e.dataset && e.dataset.url, e.dataset && e.dataset.file].filter(Boolean))"
+              dom_urls = page.eval_on_selector_all(
+                  "a[href], audio, source, [data-src], [data-url], [data-file]", js
+              )
+              for u in dom_urls:
+                  if ext_re.search(u):
+                      found.setdefault(u, "dom")
+
+              for m in html_re.findall(html):
+                  u = m.replace("\\/", "/")
+                  found.setdefault(urllib.parse.urljoin(url, u), "html")
+
+              print("Found", len(found), "audio URLs")
+              for u, src in found.items():
+                  print(" - [" + src + "]", u)
+
+              if not found:
+                  print("No audio links found. See debug artifact (page.png / page.html).")
+                  browser.close()
+                  sys.exit(1)
+
+              ok = 0
+              used = set()
+              for u in found:
+                  name = urllib.parse.unquote(os.path.basename(urllib.parse.urlparse(u).path)) or "audio.mp3"
+                  base, ext = os.path.splitext(name)
+                  i = 1
+                  while name in used or os.path.exists(name):
+                      name = base + "_" + str(i) + ext
+                      i += 1
+                  used.add(name)
+                  print("Downloading:", name)
+                  try:
+                      r = ctx.request.get(u, headers={"Referer": url}, timeout=120000)
+                      if r.ok:
+                          with open(name, "wb") as f:
+                              f.write(r.body())
+                          ok += 1
+                      else:
+                          print("  failed: HTTP", r.status)
+                  except Exception as e:
+                      print("  failed:", e)
+
+              browser.close()
+              print("Downloaded", ok, "/", len(found), "files")
+              if ok == 0:
+                  sys.exit(1)
           EOF
+
+      - name: Upload debug files
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: musopen-debug
+          path: debug/
+          if-no-files-found: ignore
+
+      - name: Upload downloaded audio
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: musopen-audio
+          path: download/
+          if-no-files-found: ignore
