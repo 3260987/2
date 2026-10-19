@@ -1,58 +1,4 @@
-name: Musopen Downloader
-
-on:
-  workflow_dispatch:
-    inputs:
-      musopen_url:
-        description: "Musopen Page URL"
-        required: true
-        type: string
-
-      release_name:
-        description: "Release name"
-        required: true
-        type: string
-
-permissions:
-  contents: write
-
-jobs:
-  download:
-    runs-on: ubuntu-latest
-    timeout-minutes: 240
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Install dependencies
-        shell: bash
-        run: |
-          set -e
-
-          sudo apt-get update
-
-          sudo apt-get install -y \
-            zip \
-            unzip \
-            git \
-            curl \
-            wget \
-            python3 \
-            python3-pip
-
-      - name: Prepare folders
-        shell: bash
-        run: |
-          set -e
-
-          rm -rf download
-          rm -rf release_files
-
-          mkdir -p download
-          mkdir -p release_files
-
-      - name: Download audio files from Musopen page
+- name: Download audio files from Musopen page
         shell: bash
         env:
           TARGET_URL: ${{ inputs.musopen_url }}
@@ -61,46 +7,41 @@ jobs:
 
           cd download
 
-          # שימוש ב-wget לסריקת הדף והורדת קבצי השמע (MP3) המקושרים אליו
-          wget \
-            --recursive \
-            --no-parent \
-            --accept=mp3 \
-            --reject="index.html*" \
-            --no-directories \
-            "$TARGET_URL" || true
+          python3 - << 'EOF'
+          import os
+          import urllib.request
+          import urllib.parse
+          import re
+          import json
+          import urllib.error
 
-      - name: Verify downloaded files
-        shell: bash
-        run: |
-          set -e
+          url = os.environ['TARGET_URL']
+          req = urllib.request.Request(
+              url,
+              headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
+          )
 
-          if ! find download -type f | grep -q .; then
-            echo "ERROR: No files were downloaded."
-            exit 1
-          fi
+          try:
+              with urllib.request.urlopen(req) as response:
+                  html_content = response.read().decode('utf-8')
+          except Exception as e:
+              print(f"Error fetching URL: {e}")
+              exit(1)
 
-          find download -type f -printf '%p - %s bytes\n'
+          # חיפוש קישורים לקבצי MP3 בדף
+          mp3_links = re.findall(r'href="([^"]+\.mp3[^"]*)"', html_content)
+          
+          # ניקוי כתובות כפולות
+          mp3_links = list(set(mp3_links))
+          
+          print(f"Found {len(mp3_links)} MP3 links.")
 
-      - name: Package download
-        shell: bash
-        run: |
-          set -e
-
-          zip -r \
-            "release_files/musopen-download.zip" \
-            download
-
-      - name: Create GitHub Release
-        shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-          RELEASE_NAME: ${{ inputs.release_name }}
-        run: |
-          set -e
-
-          gh release create \
-            "musopen-${GITHUB_RUN_ID}" \
-            release_files/* \
-            --title "$RELEASE_NAME" \
-            --notes ""
+          for link in mp3_links:
+              full_url = urllib.parse.urljoin(url, link)
+              filename = os.path.basename(urllib.parse.urlparse(full_url).path)
+              print(f"Downloading: {filename}")
+              try:
+                  urllib.request.urlretrieve(full_url, filename)
+              except Exception as e:
+                  print(f"Failed to download {full_url}: {e}")
+          EOF
