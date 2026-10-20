@@ -1,34 +1,4 @@
-name: Musopen Download
-
-on:
-  workflow_dispatch:
-    inputs:
-      musopen_url:
-        description: "Musopen page URL"
-        required: true
-
-jobs:
-  download:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-
-      - name: Install dependencies
-        run: |
-          pip install playwright requests
-          playwright install --with-deps chromium
-
-      - name: Download audio files from Musopen page
-        shell: bash
-        env:
-          TARGET_URL: ${{ inputs.musopen_url }}
-          DEBUG_DIR: ${{ github.workspace }}/debug
-          OUT_DIR: ${{ github.workspace }}/download
-        run: |
+run: |
           python3 - << 'EOF'
           import os
           import re
@@ -70,29 +40,44 @@ jobs:
 
               page.on("response", on_response)
 
-              resp = page.goto(url, wait_until="networkidle", timeout=90000)
-              print(f"HTTP status: {resp.status if resp else None} - Title: {page.title()}")
+              # Changed wait_until to domcontentloaded and wrapped in try-except to avoid timeout crashes
+              print(f"Loading URL: {url}")
+              try:
+                  resp = page.goto(url, wait_until="domcontentloaded", timeout=60000)
+                  print(f"HTTP status: {resp.status if resp else None} - Title: {page.title()}")
+              except Exception as e:
+                  print(f"Warning during page load (ignoring): {e}")
+              
               page.wait_for_timeout(3000)
 
               # 2. Inject JS to hook audio element creations
-              page.evaluate("""
-                  window._audioUrls = new Set();
-                  const origAudio = window.Audio;
-                  window.Audio = function(...args) {
-                      if(args[0]) window._audioUrls.add(args[0]);
-                      return new origAudio(...args);
-                  };
-                  const origPlay = HTMLMediaElement.prototype.play;
-                  HTMLMediaElement.prototype.play = function() {
-                      if(this.src) window._audioUrls.add(this.src);
-                      return origPlay.apply(this, arguments);
-                  };
-              """)
+              try:
+                  page.evaluate("""
+                      window._audioUrls = new Set();
+                      const origAudio = window.Audio;
+                      window.Audio = function(...args) {
+                          if(args[0]) window._audioUrls.add(args[0]);
+                          return new origAudio(...args);
+                      };
+                      if (window.HTMLMediaElement) {
+                          const origPlay = HTMLMediaElement.prototype.play;
+                          HTMLMediaElement.prototype.play = function() {
+                              if(this.src) window._audioUrls.add(this.src);
+                              return origPlay.apply(this, arguments);
+                          };
+                      }
+                  """)
+              except Exception as e:
+                  print("JS Hooking warning:", e)
 
               # Scroll down to load elements lazy-loaded by the UI
+              print("Scrolling page...")
               for _ in range(5):
-                  page.mouse.wheel(0, 2000)
-                  page.wait_for_timeout(500)
+                  try:
+                      page.mouse.wheel(0, 2000)
+                      page.wait_for_timeout(500)
+                  except Exception:
+                      pass
 
               # 3. Simulate clicking ALL play buttons on the page to trigger audio network requests
               print("Triggering play buttons to sniff network streams...")
@@ -107,48 +92,56 @@ jobs:
               ]
               
               for selector in play_selectors:
-                  elements = page.locator(selector).all()
-                  for el in elements:
-                      try:
-                          if el.is_visible():
-                              el.scroll_into_view_if_needed()
-                              # force=True prevents some elements from intercepting clicks
-                              el.click(force=True, timeout=1000)
-                              page.wait_for_timeout(500)
-                      except Exception:
-                          pass
+                  try:
+                      elements = page.locator(selector).all()
+                      for el in elements:
+                          try:
+                              if el.is_visible():
+                                  el.scroll_into_view_if_needed()
+                                  el.click(force=True, timeout=1000)
+                                  page.wait_for_timeout(500)
+                          except Exception:
+                              pass
+                  except Exception:
+                      pass
 
               page.wait_for_timeout(3000)
 
               # 4. Extract URLs from the injected JS hook
               try:
-                  hijacked_urls = page.evaluate("Array.from(window._audioUrls)")
+                  hijacked_urls = page.evaluate("Array.from(window._audioUrls || [])")
                   for u in hijacked_urls:
                       found[urllib.parse.urljoin(url, u)] = "js-hook"
               except Exception as e:
                   print("Hook read error:", e)
 
               # 5. Extract URLs from standard DOM dataset attributes
-              js_dom = "els => els.flatMap(e => [e.href, e.src, e.currentSrc, e.dataset?.src, e.dataset?.url, e.dataset?.file, e.dataset?.audioUrl].filter(Boolean))"
-              dom_urls = page.eval_on_selector_all(
-                  "a[href], audio, source, [data-src], [data-url], [data-file], [data-audio-url], button", js_dom
-              )
-              ext_re = re.compile(r"\.(mp3|m4a|ogg|wav|flac)(?:\?|$)", re.I)
-              for u in dom_urls:
-                  if ext_re.search(u):
-                      found[urllib.parse.urljoin(url, u)] = "dom"
+              try:
+                  js_dom = "els => els.flatMap(e => [e.href, e.src, e.currentSrc, e.dataset?.src, e.dataset?.url, e.dataset?.file, e.dataset?.audioUrl].filter(Boolean))"
+                  dom_urls = page.eval_on_selector_all(
+                      "a[href], audio, source, [data-src], [data-url], [data-file], [data-audio-url], button", js_dom
+                  )
+                  ext_re = re.compile(r"\.(mp3|m4a|ogg|wav|flac)(?:\?|$)", re.I)
+                  for u in dom_urls:
+                      if ext_re.search(u):
+                          found[urllib.parse.urljoin(url, u)] = "dom"
+              except Exception:
+                  pass
 
               # 6. Final fallback: raw HTML regex matching
-              html = page.content()
-              html_re = re.compile(r"(https?:[\\/]+[^\"'\s<>\\]+?\.(?:mp3|m4a|ogg|wav|flac)(?:\?[^\"'\s<>\\]*)?)", re.I)
-              for m in html_re.findall(html):
-                  u = m.replace("\\/", "/")
-                  found[urllib.parse.urljoin(url, u)] = "html-regex"
+              try:
+                  html = page.content()
+                  html_re = re.compile(r"(https?:[\\/]+[^\"'\s<>\\]+?\.(?:mp3|m4a|ogg|wav|flac)(?:\?[^\"'\s<>\\]*)?)", re.I)
+                  for m in html_re.findall(html):
+                      u = m.replace("\\/", "/")
+                      found[urllib.parse.urljoin(url, u)] = "html-regex"
 
-              # Save debug snapshot
-              page.screenshot(path=os.path.join(debug_dir, "page.png"), full_page=True)
-              with open(os.path.join(debug_dir, "page.html"), "w", encoding="utf-8") as f:
-                  f.write(html)
+                  # Save debug snapshot
+                  page.screenshot(path=os.path.join(debug_dir, "page.png"), full_page=True)
+                  with open(os.path.join(debug_dir, "page.html"), "w", encoding="utf-8") as f:
+                      f.write(html)
+              except Exception as e:
+                  print("Debug artifact error:", e)
 
               # Capture Playwright cookies to pass to Requests
               cookies = {c["name"]: c["value"] for c in ctx.cookies()}
@@ -169,6 +162,8 @@ jobs:
           session.headers.update({"User-Agent": UA, "Referer": url})
           session.cookies.update(cookies)
 
+          ext_re = re.compile(r"\.(mp3|m4a|ogg|wav|flac)", re.I)
+          
           for u in found:
               parsed = urllib.parse.urlparse(u)
               name = urllib.parse.unquote(os.path.basename(parsed.path))
@@ -198,19 +193,3 @@ jobs:
           if ok == 0:
               sys.exit(1)
           EOF
-
-      - name: Upload debug files
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: musopen-debug
-          path: debug/
-          if-no-files-found: ignore
-
-      - name: Upload downloaded audio
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: musopen-audio
-          path: download/
-          if-no-files-found: ignore
