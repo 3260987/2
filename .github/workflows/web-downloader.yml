@@ -1,4 +1,4 @@
-name: Web Downloader - HTML with JavaScript Test
+name: Web Downloader - JavaScript Test
 
 on:
   workflow_dispatch:
@@ -20,7 +20,7 @@ permissions:
 jobs:
   download-and-zip:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 25
 
     steps:
       - name: Install dependencies
@@ -29,13 +29,13 @@ jobs:
           python -m playwright install --with-deps chromium
           npm install -g single-file-cli
 
-      - name: Save page with JavaScript and embedded resources
+      - name: Capture homepage with JavaScript
         env:
           PAGE_URL: ${{ inputs.url }}
         run: |
           mkdir -p download
 
-          cat > save_page.py <<'PY'
+          cat > capture_page.py <<'PY'
           import os
           from pathlib import Path
           from playwright.sync_api import sync_playwright
@@ -45,14 +45,16 @@ jobs:
           if not url.startswith(("https://", "http://")):
               raise SystemExit("URL must start with http:// or https://")
 
-          output = Path("download/Website.html")
-
           with sync_playwright() as p:
               browser = p.chromium.launch(headless=True)
-              context = browser.new_context(
+              page = browser.new_page(
                   viewport={"width": 1280, "height": 900}
               )
-              page = context.new_page()
+
+              page.on(
+                  "pageerror",
+                  lambda error: print("Page JavaScript error:", error)
+              )
 
               response = page.goto(
                   url,
@@ -70,28 +72,25 @@ jobs:
                       "networkidle", timeout=15000
                   )
               except Exception:
-                  pass
+                  print("Network did not become idle; continuing.")
 
               page.wait_for_timeout(3000)
+
+              print("Page title:", page.title())
+              print("Final URL:", page.url)
+              print("JavaScript scripts:", page.locator("script").count())
+
               browser.close()
           PY
 
-          python save_page.py
+          python capture_page.py
 
-          # SingleFile captures the rendered page and embeds
-          # accessible resources while retaining page scripts.
-          single-file \
-            --browser-executable-path="$(which chromium || which chromium-browser || echo /usr/bin/google-chrome)" \
-            --browser-args="--no-sandbox" \
-            --browser-wait-until=networkidle \
-            --browser-wait-delay=2000 \
-            --remove-scripts=false \
-            "$PAGE_URL" download/Website.html
+          # Save the page and embed resources with SingleFile.
+          single-file "$PAGE_URL" download/Website.html
 
           test -s download/Website.html
-          ls -lh download/Website.html
 
-      - name: Verify HTML
+      - name: Verify saved HTML and JavaScript
         run: |
           python - <<'PY'
           from pathlib import Path
@@ -100,15 +99,18 @@ jobs:
           path = Path("download/Website.html")
           data = path.read_text(encoding="utf-8", errors="replace")
 
-          class Check(HTMLParser):
+          class CheckHTML(HTMLParser):
               pass
 
-          Check().feed(data)
+          CheckHTML().feed(data)
 
-          print("HTML parsed successfully")
-          print("Size:", round(path.stat().st_size / 1024, 1), "KB")
+          print("HTML parsing: OK")
+          print("File size:", round(path.stat().st_size / 1024, 1), "KB")
           print("Script tags:", data.lower().count("<script"))
           print("Embedded images:", data.count("data:image/"))
+
+          if len(data) < 100:
+              raise SystemExit("Output HTML is unexpectedly small")
           PY
 
       - name: Create ZIP
@@ -132,4 +134,4 @@ jobs:
           gh release create "$TAG_NAME" output/*.zip \
             --repo "$GITHUB_REPOSITORY" \
             --title "$RELEASE_NAME" \
-            --notes "Single-file HTML test with JavaScript retained. Extract the ZIP and open Website.html."
+            --notes "Single HTML homepage test with JavaScript retained where supported. Extract the ZIP and open Website.html."
