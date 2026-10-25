@@ -1,4 +1,5 @@
-name: Web Downloader - JavaScript Test
+
+name: Website Downloader - Single HTML Archive
 
 on:
   workflow_dispatch:
@@ -6,132 +7,121 @@ on:
       url:
         description: "Website URL"
         required: true
-        default: "https://darknetdiaries.com/"
         type: string
+        default: "https://darknetdiaries.com/"
+
       release_name:
         description: "Release name"
         required: true
-        default: "Darknet-Diaries-JS-Test"
         type: string
+        default: "Downloaded-Website"
+
+      max_depth:
+        description: "Maximum link depth (1-5)"
+        required: true
+        type: choice
+        options:
+          - "1"
+          - "2"
+          - "3"
+          - "4"
+          - "5"
+        default: "5"
 
 permissions:
   contents: write
 
+concurrency:
+  group: website-downloader-${{ github.run_id }}
+  cancel-in-progress: false
+
 jobs:
-  download-and-zip:
+  download:
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 360
 
     steps:
-      - name: Install dependencies
-        run: |
-          python -m pip install --disable-pip-version-check playwright
-          python -m playwright install --with-deps chromium
-          npm install -g single-file-cli
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
 
-      - name: Capture homepage with JavaScript
+      - name: Install Deno
+        uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.x
+
+      - name: Install Chromium and dependencies
+        run: |
+          npx --yes playwright install --with-deps chromium
+
+      - name: Install SingleFile
+        run: |
+          npm install --global single-file-cli
+          single-file --help
+
+      - name: Prepare output
+        shell: bash
+        run: |
+          mkdir -p output
+          echo "URL=${{ inputs.url }}" >> "$GITHUB_ENV"
+          echo "DEPTH=${{ inputs.max_depth }}" >> "$GITHUB_ENV"
+
+      - name: Locate Chromium
+        id: browser
+        shell: bash
+        run: |
+          CHROME_PATH="$(find "$HOME/.cache/ms-playwright" \
+            -type f \( -path '*/chrome-linux/chrome' \
+            -o -path '*/chrome-linux64/chrome' \) \
+            -print -quit)"
+
+          if [ -z "$CHROME_PATH" ]; then
+            echo "Chromium executable was not found."
+            exit 1
+          fi
+
+          echo "path=$CHROME_PATH" >> "$GITHUB_OUTPUT"
+          echo "Using Chromium: $CHROME_PATH"
+
+      - name: Capture website into one HTML archive
+        shell: bash
         env:
           PAGE_URL: ${{ inputs.url }}
+          MAX_DEPTH: ${{ inputs.max_depth }}
+          CHROME_PATH: ${{ steps.browser.outputs.path }}
         run: |
-          mkdir -p download
+          set -euo pipefail
 
-          cat > capture_page.py <<'PY'
-          import os
-          from pathlib import Path
-          from playwright.sync_api import sync_playwright
+          single-file "$PAGE_URL" output/Website.html \
+            --browser-executable-path="$CHROME_PATH" \
+            --crawl-links=true \
+            --crawl-inner-links-only=true \
+            --crawl-max-depth="$MAX_DEPTH" \
+            --crawl-save-archive=true \
+            --crawl-save-archive-mark-unarchived-links=true
 
-          url = os.environ["PAGE_URL"]
+          if [ ! -s output/Website.html ]; then
+            echo "The HTML archive was not created."
+            exit 1
+          fi
 
-          if not url.startswith(("https://", "http://")):
-              raise SystemExit("URL must start with http:// or https://")
+          echo "HTML archive created:"
+          ls -lh output/Website.html
 
-          with sync_playwright() as p:
-              browser = p.chromium.launch(headless=True)
-              page = browser.new_page(
-                  viewport={"width": 1280, "height": 900}
-              )
-
-              page.on(
-                  "pageerror",
-                  lambda error: print("Page JavaScript error:", error)
-              )
-
-              response = page.goto(
-                  url,
-                  wait_until="domcontentloaded",
-                  timeout=60000
-              )
-
-              if response and response.status >= 400:
-                  raise SystemExit(
-                      f"Website returned HTTP {response.status}"
-                  )
-
-              try:
-                  page.wait_for_load_state(
-                      "networkidle", timeout=15000
-                  )
-              except Exception:
-                  print("Network did not become idle; continuing.")
-
-              page.wait_for_timeout(3000)
-
-              print("Page title:", page.title())
-              print("Final URL:", page.url)
-              print("JavaScript scripts:", page.locator("script").count())
-
-              browser.close()
-          PY
-
-          python capture_page.py
-
-          # Save the page and embed resources with SingleFile.
-          single-file "$PAGE_URL" download/Website.html
-
-          test -s download/Website.html
-
-      - name: Verify saved HTML and JavaScript
+      - name: Package the single HTML file
+        shell: bash
         run: |
-          python - <<'PY'
-          from pathlib import Path
-          from html.parser import HTMLParser
+          set -euo pipefail
+          cd output
+          zip -9 Website.zip Website.html
+          unzip -l Website.zip
+          test "$(unzip -Z1 Website.zip | wc -l)" -eq 1
 
-          path = Path("download/Website.html")
-          data = path.read_text(encoding="utf-8", errors="replace")
-
-          class CheckHTML(HTMLParser):
-              pass
-
-          CheckHTML().feed(data)
-
-          print("HTML parsing: OK")
-          print("File size:", round(path.stat().st_size / 1024, 1), "KB")
-          print("Script tags:", data.lower().count("<script"))
-          print("Embedded images:", data.count("data:image/"))
-
-          if len(data) < 100:
-              raise SystemExit("Output HTML is unexpectedly small")
-          PY
-
-      - name: Create ZIP
-        env:
-          RELEASE_NAME: ${{ inputs.release_name }}
-        run: |
-          SAFE_NAME=$(printf '%s' "$RELEASE_NAME" |
-            sed 's/[^A-Za-z0-9._-]/_/g')
-          [ -n "$SAFE_NAME" ] || SAFE_NAME="Website-JS-Test"
-
-          mkdir -p output
-          zip -j "output/${SAFE_NAME}.zip" download/Website.html
-
-      - name: Upload to GitHub Releases
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          RELEASE_NAME: ${{ inputs.release_name }}
-        run: |
-          TAG_NAME="homepage-js-test-${GITHUB_RUN_ID}"
-
-          gh release create "$TAG_NAME" output/*.zip \
-            --repo "$GITHUB_REPOSITORY" \
-            --title "$RELEASE_NAME" \
-            --notes "Single HTML homepage test with JavaScript retained where supported. Extract the ZIP and open Website.html."
+      - name: Publish download
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: website-${{ github.run_number }}
+          name: ${{ inputs.release_name }}
+          generate_release_notes: false
+          files: output/Website.zip
