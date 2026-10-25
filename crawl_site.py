@@ -37,7 +37,8 @@ SKIP_EXT = re.compile(
     r"css|js|json|xml|txt|rss|woff2?|ttf|apk|exe|dmg)$",
     re.I,
 )
-LINK_RE = re.compile(r"<a\b[^>]*?\shref\s*=\s*(?:\"([^\"]*)\"|'([^']*)')", re.I | re.S)
+# href may be double-quoted, single-quoted or UNQUOTED (single-file minifies the HTML and strips quotes)
+LINK_RE = re.compile(r"<a\b[^>]*?[\s\"']href\s*=\s*(?:\"([^\"]*)\"|'([^']*)'|([^\s\"'>]+))", re.I | re.S)
 TITLE_RE = re.compile(r"<title[^>]*>(.*?)</title>", re.I | re.S)
 
 
@@ -71,7 +72,7 @@ def wanted(link):
 def extract_links(page_html, base_url):
     out = []
     for m in LINK_RE.finditer(page_html):
-        href = htmllib.unescape((m.group(1) or m.group(2) or "").strip())
+        href = htmllib.unescape((m.group(1) or m.group(2) or m.group(3) or "").strip())
         if not href or href.startswith(("#", "mailto:", "javascript:", "tel:", "data:")):
             continue
         full = urldefrag(urljoin(base_url, href))[0]
@@ -136,12 +137,15 @@ while queue and len(pages) < args.max_pages:
         m = TITLE_RE.search(content)
         title = htmllib.unescape(m.group(1)).strip() if m else url
         pages[key(url)] = {"u": url, "t": title or url, "h": content}
-        print(f"OK [{len(pages)}/{args.max_pages}] {url}", flush=True)
-        for link in extract_links(content, url):
+        links = extract_links(content, url)
+        new = 0
+        for link in links:
             k = key(link)
             if k not in seen:
                 seen.add(k)
                 queue.append(link)
+                new += 1
+        print(f"OK [{len(pages)}/{args.max_pages}] {url}  (links found: {len(links)}, new: {new}, queue: {len(queue)})", flush=True)
 
 if not pages:
     print("No pages were saved.")
