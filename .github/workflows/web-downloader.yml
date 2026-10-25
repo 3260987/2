@@ -1,0 +1,166 @@
+name: Web Downloader
+
+on:
+  workflow_dispatch:
+    inputs:
+      url:
+        description: 'Page/Site link (הדבק את הקישור כאן)'
+        required: true
+      format:
+        description: 'Output format (בחר פורמט)'
+        type: choice
+        required: true
+        default: 'html-single-page'
+        options:
+          - html-single-page
+          - pdf
+          - html-page
+          - html-site
+      release_name:
+        description: 'Name for the Release (שם ההורדה)'
+        required: true
+        default: 'Web-Download'
+
+jobs:
+  download-and-zip:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      # --- 1. Download as Embedded Single HTML (Base64) ---
+      - name: Download as Embedded Single HTML
+        if: ${{ github.event.inputs.format == 'html-single-page' }}
+        env:
+          PAGE_URL: ${{ github.event.inputs.url }}
+          RELEASE_NAME: ${{ github.event.inputs.release_name }}
+        run: |
+          mkdir -p download
+          SAFE_RELEASE=$(echo "$RELEASE_NAME" | sed 's/[^A-Za-z0-9._-]/_/g')
+          [ -z "$SAFE_RELEASE" ] && SAFE_RELEASE="Page"
+          
+          # מתקין את הכלי שיודע להטמיע את כל האתר לקובץ טקסט אחד
+          npm install -g single-file-cli
+          
+          echo "Downloading and embedding page into a single file..."
+          single-file --browser-executable-path=google-chrome "$PAGE_URL" "download/${SAFE_RELEASE}.html"
+          
+          ls -lh download
+
+      # --- 2. Download as PDF ---
+      - name: Download as PDF (full page)
+        if: ${{ github.event.inputs.format == 'pdf' }}
+        env:
+          PAGE_URL: ${{ github.event.inputs.url }}
+          RELEASE_NAME: ${{ github.event.inputs.release_name }}
+        run: |
+          mkdir -p download
+          SAFE_RELEASE=$(echo "$RELEASE_NAME" | sed 's/[^A-Za-z0-9._-]/_/g')
+          [ -z "$SAFE_RELEASE" ] && SAFE_RELEASE="Page"
+          
+          pip install playwright
+          playwright install --with-deps chromium
+
+          cat > save_pdf.py <<'PY'
+          import sys
+          from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
+          url, out = sys.argv[1], sys.argv[2]
+          SCROLL_JS = """
+          async () => {
+            await new Promise(resolve => {
+              let y = 0, steps = 0;
+              const timer = setInterval(() => {
+                window.scrollBy(0, 800);
+                y += 800; steps++;
+                if (y >= document.body.scrollHeight || steps > 60) {
+                  clearInterval(timer);
+                  window.scrollTo(0, 0);
+                  resolve();
+                }
+              }, 200);
+            });
+          }
+          """
+          UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+          with sync_playwright() as p:
+              browser = p.chromium.launch(args=["--disable-blink-features=AutomationControlled"])
+              ctx = browser.new_context(user_agent=UA, viewport={"width": 1280, "height": 1024})
+              page = ctx.new_page()
+              try:
+                  page.goto(url, wait_until="domcontentloaded", timeout=60000)
+              except PWTimeout:
+                  pass
+              try:
+                  page.wait_for_load_state("networkidle", timeout=10000)
+              except PWTimeout:
+                  pass
+              page.evaluate(SCROLL_JS)
+              page.wait_for_timeout(2000)
+              page.emulate_media(media="screen")
+              page.pdf(path=out, format="A4", print_background=True)
+              browser.close()
+          PY
+
+          python save_pdf.py "$PAGE_URL" "download/${SAFE_RELEASE}.pdf"
+
+      # --- 3. Download as HTML (Classic single page with folders) ---
+      - name: Download as HTML (Single Page with folders)
+        if: ${{ github.event.inputs.format == 'html-page' }}
+        env:
+          PAGE_URL: ${{ github.event.inputs.url }}
+        run: |
+          mkdir -p download
+          wget --page-requisites --convert-links --adjust-extension --no-parent \
+               --restrict-file-names=windows -e robots=off \
+               --user-agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36" \
+               --timeout=60 --tries=3 -P download "$PAGE_URL" || true
+
+      # --- 4. Download Entire Site ---
+      - name: Download Entire Site as HTML
+        if: ${{ github.event.inputs.format == 'html-site' }}
+        env:
+          PAGE_URL: ${{ github.event.inputs.url }}
+        run: |
+          mkdir -p download
+          wget --mirror --quota=5500m --convert-links --adjust-extension --page-requisites --no-parent \
+               --restrict-file-names=windows -e robots=off \
+               --user-agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36" \
+               --timeout=60 --tries=3 -P download "$PAGE_URL" || true
+
+      # --- Verification & Zipping ---
+      - name: Verify download
+        run: |
+          if [ -z "$(ls -A download 2>/dev/null)" ]; then
+            echo "Download folder is empty - nothing was downloaded."
+            exit 1
+          fi
+
+      - name: Pack into ZIP
+        env:
+          RELEASE_NAME: ${{ github.event.inputs.release_name }}
+        run: |
+          mkdir -p output
+          SAFE_RELEASE=$(echo "$RELEASE_NAME" | sed 's/[^A-Za-z0-9._-]/_/g')
+          [ -z "$SAFE_RELEASE" ] && SAFE_RELEASE="download"
+          cd download
+          zip -r -s 1950m "../output/${SAFE_RELEASE}.zip" .
+          cd ..
+
+      - name: Upload to GitHub Releases
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_NAME: ${{ github.event.inputs.release_name }}
+          FORMAT: ${{ github.event.inputs.format }}
+        run: |
+          TAG_NAME="download-${GITHUB_RUN_ID}"
+          cat > notes.md <<NOTES
+          ההורדה הסתיימה בהצלחה! 📥
+          פורמט: ${FORMAT}
+          
+          ⚠️ **שים לב:** 
+          אם יש כאן מספר קבצים (למשל סיומות כמו .z01, .z02 בנוסף ל-.zip), יש להוריד את כל החלקים לאותה תיקייה ולחלץ אך ורק את קובץ ה-.zip.
+          NOTES
+          gh release create "$TAG_NAME" output/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "📥 $RELEASE_NAME" \
+            --notes-file notes.md
