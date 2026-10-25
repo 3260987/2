@@ -9,6 +9,27 @@ on:
         type: string
         default: "https://darknetdiaries.com/"
 
+      max_pages:
+        description: "Max pages to save (start small, e.g. 5, then increase)"
+        required: true
+        type: string
+        default: "30"
+
+      include_regex:
+        description: "Optional: only follow links matching this regex (e.g. /episode/). Empty = all"
+        required: false
+        type: string
+        default: ""
+
+      block_images:
+        description: "Block images (much smaller file)"
+        required: true
+        type: choice
+        options:
+          - "false"
+          - "true"
+        default: "false"
+
       release_name:
         description: "Release name"
         required: true
@@ -25,9 +46,12 @@ concurrency:
 jobs:
   download:
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 350
 
     steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
@@ -40,65 +64,51 @@ jobs:
         run: |
           npm install --global single-file-cli
           single-file --version
-          single-file --help
 
       - name: Find Chromium executable
         id: browser
         shell: bash
         run: |
           set -euo pipefail
-
           CHROME_PATH="$(find "$HOME/.cache/ms-playwright" \
             -type f \( -path '*/chrome-linux/chrome' \
             -o -path '*/chrome-linux64/chrome' \) \
             -print -quit)"
-
           if [ -z "$CHROME_PATH" ]; then
             echo "Chromium executable not found."
             exit 1
           fi
-
           echo "path=$CHROME_PATH" >> "$GITHUB_OUTPUT"
 
-      - name: Save website as one HTML file
+      - name: Crawl site and build ONE offline HTML file
         shell: bash
         env:
           PAGE_URL: ${{ inputs.url }}
+          MAX_PAGES: ${{ inputs.max_pages }}
+          INCLUDE_RE: ${{ inputs.include_regex }}
+          BLOCK_IMAGES: ${{ inputs.block_images }}
           CHROME_PATH: ${{ steps.browser.outputs.path }}
         run: |
           set -euo pipefail
-
           mkdir -p output
-
-          single-file "$PAGE_URL" output/Website.html \
-            --browser-executable-path="$CHROME_PATH"
-
-          if [ ! -s output/Website.html ]; then
-            echo "HTML file was not created."
-            exit 1
-          fi
-
-          echo "HTML file created:"
+          python3 crawl_site.py \
+            --url "$PAGE_URL" \
+            --chrome "$CHROME_PATH" \
+            --out output/Website.html \
+            --max-pages "$MAX_PAGES" \
+            --include "$INCLUDE_RE" \
+            --block-images "$BLOCK_IMAGES"
+          test -s output/Website.html
           ls -lh output/Website.html
-
-          if ! grep -qi '<html' output/Website.html; then
-            echo "The output does not appear to be a complete HTML document."
-            exit 1
-          fi
 
       - name: Create ZIP containing only the HTML file
         shell: bash
         run: |
           set -euo pipefail
-
           cd output
           zip -9 Website.zip Website.html
-
-          echo "ZIP contents:"
           unzip -l Website.zip
-
-          test "$(unzip -Z1 Website.zip | wc -l)" -eq 1
-          test "$(unzip -Z1 Website.zip)" = "Website.html"
+          ls -lh Website.zip
 
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
