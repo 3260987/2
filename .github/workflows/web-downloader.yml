@@ -1,5 +1,4 @@
-
-name: Website Downloader - Single HTML Archive
+name: Website Downloader
 
 on:
   workflow_dispatch:
@@ -16,18 +15,6 @@ on:
         type: string
         default: "Downloaded-Website"
 
-      max_depth:
-        description: "Maximum link depth (1-5)"
-        required: true
-        type: choice
-        options:
-          - "1"
-          - "2"
-          - "3"
-          - "4"
-          - "5"
-        default: "5"
-
 permissions:
   contents: write
 
@@ -38,87 +25,82 @@ concurrency:
 jobs:
   download:
     runs-on: ubuntu-latest
-    timeout-minutes: 360
+    timeout-minutes: 120
 
     steps:
-      - name: Install Node.js
+      - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: "22"
 
-      - name: Install Deno
-        uses: denoland/setup-deno@v2
-        with:
-          deno-version: v2.x
-
-      - name: Install Chromium and dependencies
-        run: |
-          npx --yes playwright install --with-deps chromium
+      - name: Install Chromium
+        run: npx --yes playwright install --with-deps chromium
 
       - name: Install SingleFile
         run: |
           npm install --global single-file-cli
+          single-file --version
           single-file --help
 
-      - name: Prepare output
-        shell: bash
-        run: |
-          mkdir -p output
-          echo "URL=${{ inputs.url }}" >> "$GITHUB_ENV"
-          echo "DEPTH=${{ inputs.max_depth }}" >> "$GITHUB_ENV"
-
-      - name: Locate Chromium
+      - name: Find Chromium executable
         id: browser
         shell: bash
         run: |
+          set -euo pipefail
+
           CHROME_PATH="$(find "$HOME/.cache/ms-playwright" \
             -type f \( -path '*/chrome-linux/chrome' \
             -o -path '*/chrome-linux64/chrome' \) \
             -print -quit)"
 
           if [ -z "$CHROME_PATH" ]; then
-            echo "Chromium executable was not found."
+            echo "Chromium executable not found."
             exit 1
           fi
 
           echo "path=$CHROME_PATH" >> "$GITHUB_OUTPUT"
-          echo "Using Chromium: $CHROME_PATH"
 
-      - name: Capture website into one HTML archive
+      - name: Save website as one HTML file
         shell: bash
         env:
           PAGE_URL: ${{ inputs.url }}
-          MAX_DEPTH: ${{ inputs.max_depth }}
           CHROME_PATH: ${{ steps.browser.outputs.path }}
         run: |
           set -euo pipefail
 
+          mkdir -p output
+
           single-file "$PAGE_URL" output/Website.html \
-            --browser-executable-path="$CHROME_PATH" \
-            --crawl-links=true \
-            --crawl-inner-links-only=true \
-            --crawl-max-depth="$MAX_DEPTH" \
-            --crawl-save-archive=true \
-            --crawl-save-archive-mark-unarchived-links=true
+            --browser-executable-path="$CHROME_PATH"
 
           if [ ! -s output/Website.html ]; then
-            echo "The HTML archive was not created."
+            echo "HTML file was not created."
             exit 1
           fi
 
-          echo "HTML archive created:"
+          echo "HTML file created:"
           ls -lh output/Website.html
 
-      - name: Package the single HTML file
+          if ! grep -qi '<html' output/Website.html; then
+            echo "The output does not appear to be a complete HTML document."
+            exit 1
+          fi
+
+      - name: Create ZIP containing only the HTML file
         shell: bash
         run: |
           set -euo pipefail
+
           cd output
           zip -9 Website.zip Website.html
-          unzip -l Website.zip
-          test "$(unzip -Z1 Website.zip | wc -l)" -eq 1
 
-      - name: Publish download
+          echo "ZIP contents:"
+          unzip -l Website.zip
+
+          test "$(unzip -Z1 Website.zip | wc -l)" -eq 1
+          test "$(unzip -Z1 Website.zip)" = "Website.html"
+
+      - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: website-${{ github.run_number }}
