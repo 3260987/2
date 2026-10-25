@@ -1,174 +1,211 @@
-name: Web Downloader
+name: Web Downloader - HTML Viewer Test
 
 on:
   workflow_dispatch:
     inputs:
       url:
-        description: 'Page/Site link (הדבק את הקישור כאן)'
+        description: "Website homepage URL"
         required: true
-      format:
-        description: 'Output format (בחר פורמט)'
-        type: choice
-        required: true
-        default: 'html-single-page'
-        options:
-          - html-single-page
-          - pdf
-          - html-page
-          - html-site
+        default: "https://darknetdiaries.com/"
+        type: string
       release_name:
-        description: 'Name for the Release (שם ההורדה)'
+        description: "Release name"
         required: true
-        default: 'Web-Download'
+        default: "Darknet-Diaries-Homepage-Test"
+        type: string
+
+permissions:
+  contents: write
 
 jobs:
   download-and-zip:
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
+    timeout-minutes: 20
 
     steps:
-
-    # --- 0. Install Google Chrome ---
-      - name: Install Google Chrome
-        if: ${{ github.event.inputs.format == 'html-single-page' }}
+      - name: Install Playwright and Chromium
         run: |
-          sudo apt-get update
-          sudo apt-get install -y google-chrome-stable
-          
-      # --- 1. Download as Embedded Single HTML (Base64) ---
-      - name: Download as Embedded Single HTML
-        if: ${{ github.event.inputs.format == 'html-single-page' }}
+          python -m pip install --disable-pip-version-check playwright
+          python -m playwright install --with-deps chromium
+
+      - name: Save homepage as one self-contained HTML file
         env:
-          PAGE_URL: ${{ github.event.inputs.url }}
-          RELEASE_NAME: ${{ github.event.inputs.release_name }}
+          PAGE_URL: ${{ inputs.url }}
         run: |
           mkdir -p download
-          SAFE_RELEASE=$(echo "$RELEASE_NAME" | sed 's/[^A-Za-z0-9._-]/_/g')
-          [ -z "$SAFE_RELEASE" ] && SAFE_RELEASE="Page"
-          
-          # מתקין את הכלי שיודע להטמיע את כל האתר לקובץ טקסט אחד
-          npm install -g single-file-cli
-          
-          echo "Downloading and embedding page into a single file..."
-          single-file --browser-executable-path=google-chrome "$PAGE_URL" "download/${SAFE_RELEASE}.html"
-          
-          ls -lh download
 
-      # --- 2. Download as PDF ---
-      - name: Download as PDF (full page)
-        if: ${{ github.event.inputs.format == 'pdf' }}
-        env:
-          PAGE_URL: ${{ github.event.inputs.url }}
-          RELEASE_NAME: ${{ github.event.inputs.release_name }}
-        run: |
-          mkdir -p download
-          SAFE_RELEASE=$(echo "$RELEASE_NAME" | sed 's/[^A-Za-z0-9._-]/_/g')
-          [ -z "$SAFE_RELEASE" ] && SAFE_RELEASE="Page"
-          
-          pip install playwright
-          playwright install --with-deps chromium
+          cat > save_page.py <<'PY'
+          import os
+          from pathlib import Path
+          from playwright.sync_api import sync_playwright
 
-          cat > save_pdf.py <<'PY'
-          import sys
-          from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
-          url, out = sys.argv[1], sys.argv[2]
-          SCROLL_JS = """
-          async () => {
-            await new Promise(resolve => {
-              let y = 0, steps = 0;
-              const timer = setInterval(() => {
-                window.scrollBy(0, 800);
-                y += 800; steps++;
-                if (y >= document.body.scrollHeight || steps > 60) {
-                  clearInterval(timer);
-                  window.scrollTo(0, 0);
-                  resolve();
-                }
-              }, 200);
-            });
-          }
-          """
-          UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+          url = os.environ["PAGE_URL"]
+
+          if not url.startswith(("https://", "http://")):
+              raise SystemExit("URL must start with http:// or https://")
+
+          output = Path("download/Website.html")
+
           with sync_playwright() as p:
-              browser = p.chromium.launch(args=["--disable-blink-features=AutomationControlled"])
-              ctx = browser.new_context(user_agent=UA, viewport={"width": 1280, "height": 1024})
-              page = ctx.new_page()
+              browser = p.chromium.launch(headless=True)
+              page = browser.new_page(
+                  viewport={"width": 1280, "height": 900},
+                  device_scale_factor=1
+              )
+
+              response = page.goto(
+                  url,
+                  wait_until="domcontentloaded",
+                  timeout=60000
+              )
+
+              if response and response.status >= 400:
+                  raise SystemExit(
+                      f"Website returned HTTP {response.status}"
+                  )
+
               try:
-                  page.goto(url, wait_until="domcontentloaded", timeout=60000)
-              except PWTimeout:
+                  page.wait_for_load_state(
+                      "networkidle",
+                      timeout=12000
+                  )
+              except Exception:
                   pass
-              try:
-                  page.wait_for_load_state("networkidle", timeout=10000)
-              except PWTimeout:
-                  pass
-              page.evaluate(SCROLL_JS)
+
               page.wait_for_timeout(2000)
-              page.emulate_media(media="screen")
-              page.pdf(path=out, format="A4", print_background=True)
+
+              # Inline CSS, images and fonts where possible.
+              # The resulting HTML is intended to work offline.
+              result = page.evaluate("""async () => {
+                const absolute = (u) => {
+                  try { return new URL(u, location.href).href; }
+                  catch { return ""; }
+                };
+
+                const dataUrl = async (url) => {
+                  try {
+                    const response = await fetch(url);
+                    if (!response.ok) return null;
+                    const blob = await response.blob();
+                    if (blob.size > 2 * 1024 * 1024) return null;
+
+                    return await new Promise((resolve) => {
+                      const reader = new FileReader();
+                      reader.onload = () => resolve(reader.result);
+                      reader.onerror = () => resolve(null);
+                      reader.readAsDataURL(blob);
+                    });
+                  } catch {
+                    return null;
+                  }
+                };
+
+                const clone = document.documentElement.cloneNode(true);
+
+                // Remove scripts so the HTML Viewer does not depend
+                // on the original website's JavaScript.
+                clone.querySelectorAll(
+                  'script, iframe, object, embed'
+                ).forEach(el => el.remove());
+
+                // Inline images when same-origin access allows it.
+                const originalImages = [...document.images];
+                const clonedImages = [...clone.querySelectorAll('img')];
+
+                for (let i = 0; i < clonedImages.length; i++) {
+                  const original = originalImages[i];
+                  const cloned = clonedImages[i];
+                  if (!original || !cloned) continue;
+
+                  const src = original.currentSrc || original.src;
+                  if (!src) continue;
+
+                  const embedded = await dataUrl(absolute(src));
+                  if (embedded) cloned.setAttribute('src', embedded);
+
+                  cloned.removeAttribute('srcset');
+                  cloned.removeAttribute('loading');
+                }
+
+                // Inline accessible stylesheets.
+                const styles = [...document.styleSheets];
+                const cssTexts = [];
+
+                for (const sheet of styles) {
+                  try {
+                    const rules = [...sheet.cssRules];
+                    cssTexts.push(
+                      rules.map(rule => rule.cssText).join('\\n')
+                    );
+                  } catch {
+                    // Cross-origin CSS may not be readable.
+                  }
+                }
+
+                const head = clone.querySelector('head');
+                if (head && cssTexts.length) {
+                  const style = document.createElement('style');
+                  style.textContent = cssTexts.join('\\n');
+                  head.appendChild(style);
+                }
+
+                // Make links absolute so they still point to the
+                // original website if the user has internet access.
+                clone.querySelectorAll('a[href]').forEach(a => {
+                  a.setAttribute('href', absolute(a.getAttribute('href')));
+                });
+
+                return '<!DOCTYPE html>\\n' + clone.outerHTML;
+              }""")
+
+              output.write_text(result, encoding="utf-8")
               browser.close()
+
+          if not output.exists() or output.stat().st_size < 100:
+              raise SystemExit("HTML output is missing or too small")
+
+          print("Created:", output)
+          print("Size:", output.stat().st_size, "bytes")
           PY
 
-          python save_pdf.py "$PAGE_URL" "download/${SAFE_RELEASE}.pdf"
+          python save_page.py
 
-      # --- 3. Download as HTML (Classic single page with folders) ---
-      - name: Download as HTML (Single Page with folders)
-        if: ${{ github.event.inputs.format == 'html-page' }}
+      - name: Verify HTML
+        run: |
+          test -s download/Website.html
+          python - <<'PY'
+          from html.parser import HTMLParser
+          from pathlib import Path
+
+          class CheckHTML(HTMLParser):
+              pass
+
+          file = Path("download/Website.html")
+          CheckHTML().feed(file.read_text(encoding="utf-8"))
+          print("HTML parsing passed.")
+          print(f"File size: {file.stat().st_size / 1024:.1f} KB")
+          PY
+
+      - name: Create ZIP
         env:
-          PAGE_URL: ${{ github.event.inputs.url }}
+          RELEASE_NAME: ${{ inputs.release_name }}
         run: |
-          mkdir -p download
-          wget --page-requisites --convert-links --adjust-extension --no-parent \
-               --restrict-file-names=windows -e robots=off \
-               --user-agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36" \
-               --timeout=60 --tries=3 -P download "$PAGE_URL" || true
+          SAFE_NAME=$(printf '%s' "$RELEASE_NAME" |
+            sed 's/[^A-Za-z0-9._-]/_/g')
+          [ -n "$SAFE_NAME" ] || SAFE_NAME="Homepage-Test"
 
-      # --- 4. Download Entire Site ---
-      - name: Download Entire Site as HTML
-        if: ${{ github.event.inputs.format == 'html-site' }}
-        env:
-          PAGE_URL: ${{ github.event.inputs.url }}
-        run: |
-          mkdir -p download
-          wget --mirror --quota=5500m --convert-links --adjust-extension --page-requisites --no-parent \
-               --restrict-file-names=windows -e robots=off \
-               --user-agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36" \
-               --timeout=60 --tries=3 -P download "$PAGE_URL" || true
-
-      # --- Verification & Zipping ---
-      - name: Verify download
-        run: |
-          if [ -z "$(ls -A download 2>/dev/null)" ]; then
-            echo "Download folder is empty - nothing was downloaded."
-            exit 1
-          fi
-
-      - name: Pack into ZIP
-        env:
-          RELEASE_NAME: ${{ github.event.inputs.release_name }}
-        run: |
           mkdir -p output
-          SAFE_RELEASE=$(echo "$RELEASE_NAME" | sed 's/[^A-Za-z0-9._-]/_/g')
-          [ -z "$SAFE_RELEASE" ] && SAFE_RELEASE="download"
-          cd download
-          zip -r -s 1950m "../output/${SAFE_RELEASE}.zip" .
-          cd ..
+          zip -j "output/${SAFE_NAME}.zip" download/Website.html
 
       - name: Upload to GitHub Releases
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          RELEASE_NAME: ${{ github.event.inputs.release_name }}
-          FORMAT: ${{ github.event.inputs.format }}
+          RELEASE_NAME: ${{ inputs.release_name }}
         run: |
-          TAG_NAME="download-${GITHUB_RUN_ID}"
-          cat > notes.md <<NOTES
-          ההורדה הסתיימה בהצלחה! 📥
-          פורמט: ${FORMAT}
-          
-          ⚠️ **שים לב:** 
-          אם יש כאן מספר קבצים (למשל סיומות כמו .z01, .z02 בנוסף ל-.zip), יש להוריד את כל החלקים לאותה תיקייה ולחלץ אך ורק את קובץ ה-.zip.
-          NOTES
-          gh release create "$TAG_NAME" output/* \
+          TAG_NAME="homepage-test-${GITHUB_RUN_ID}"
+
+          gh release create "$TAG_NAME" \
+            output/*.zip \
             --repo "$GITHUB_REPOSITORY" \
-            --title "📥 $RELEASE_NAME" \
-            --notes-file notes.md
+            --title "$RELEASE_NAME" \
+            --notes "Homepage HTML Viewer compatibility test. Extract the ZIP and open Website.html."
