@@ -1,17 +1,17 @@
-name: Web Downloader - HTML Viewer Test
+name: Web Downloader - HTML with JavaScript Test
 
 on:
   workflow_dispatch:
     inputs:
       url:
-        description: "Website homepage URL"
+        description: "Website URL"
         required: true
         default: "https://darknetdiaries.com/"
         type: string
       release_name:
         description: "Release name"
         required: true
-        default: "Darknet-Diaries-Homepage-Test"
+        default: "Darknet-Diaries-JS-Test"
         type: string
 
 permissions:
@@ -23,12 +23,13 @@ jobs:
     timeout-minutes: 20
 
     steps:
-      - name: Install Playwright and Chromium
+      - name: Install dependencies
         run: |
           python -m pip install --disable-pip-version-check playwright
           python -m playwright install --with-deps chromium
+          npm install -g single-file-cli
 
-      - name: Save homepage as one self-contained HTML file
+      - name: Save page with JavaScript and embedded resources
         env:
           PAGE_URL: ${{ inputs.url }}
         run: |
@@ -48,10 +49,10 @@ jobs:
 
           with sync_playwright() as p:
               browser = p.chromium.launch(headless=True)
-              page = browser.new_page(
-                  viewport={"width": 1280, "height": 900},
-                  device_scale_factor=1
+              context = browser.new_context(
+                  viewport={"width": 1280, "height": 900}
               )
+              page = context.new_page()
 
               response = page.goto(
                   url,
@@ -66,124 +67,48 @@ jobs:
 
               try:
                   page.wait_for_load_state(
-                      "networkidle",
-                      timeout=12000
+                      "networkidle", timeout=15000
                   )
               except Exception:
                   pass
 
-              page.wait_for_timeout(2000)
-
-              # Inline CSS, images and fonts where possible.
-              # The resulting HTML is intended to work offline.
-              result = page.evaluate("""async () => {
-                const absolute = (u) => {
-                  try { return new URL(u, location.href).href; }
-                  catch { return ""; }
-                };
-
-                const dataUrl = async (url) => {
-                  try {
-                    const response = await fetch(url);
-                    if (!response.ok) return null;
-                    const blob = await response.blob();
-                    if (blob.size > 2 * 1024 * 1024) return null;
-
-                    return await new Promise((resolve) => {
-                      const reader = new FileReader();
-                      reader.onload = () => resolve(reader.result);
-                      reader.onerror = () => resolve(null);
-                      reader.readAsDataURL(blob);
-                    });
-                  } catch {
-                    return null;
-                  }
-                };
-
-                const clone = document.documentElement.cloneNode(true);
-
-                // Remove scripts so the HTML Viewer does not depend
-                // on the original website's JavaScript.
-                clone.querySelectorAll(
-                  'script, iframe, object, embed'
-                ).forEach(el => el.remove());
-
-                // Inline images when same-origin access allows it.
-                const originalImages = [...document.images];
-                const clonedImages = [...clone.querySelectorAll('img')];
-
-                for (let i = 0; i < clonedImages.length; i++) {
-                  const original = originalImages[i];
-                  const cloned = clonedImages[i];
-                  if (!original || !cloned) continue;
-
-                  const src = original.currentSrc || original.src;
-                  if (!src) continue;
-
-                  const embedded = await dataUrl(absolute(src));
-                  if (embedded) cloned.setAttribute('src', embedded);
-
-                  cloned.removeAttribute('srcset');
-                  cloned.removeAttribute('loading');
-                }
-
-                // Inline accessible stylesheets.
-                const styles = [...document.styleSheets];
-                const cssTexts = [];
-
-                for (const sheet of styles) {
-                  try {
-                    const rules = [...sheet.cssRules];
-                    cssTexts.push(
-                      rules.map(rule => rule.cssText).join('\\n')
-                    );
-                  } catch {
-                    // Cross-origin CSS may not be readable.
-                  }
-                }
-
-                const head = clone.querySelector('head');
-                if (head && cssTexts.length) {
-                  const style = document.createElement('style');
-                  style.textContent = cssTexts.join('\\n');
-                  head.appendChild(style);
-                }
-
-                // Make links absolute so they still point to the
-                // original website if the user has internet access.
-                clone.querySelectorAll('a[href]').forEach(a => {
-                  a.setAttribute('href', absolute(a.getAttribute('href')));
-                });
-
-                return '<!DOCTYPE html>\\n' + clone.outerHTML;
-              }""")
-
-              output.write_text(result, encoding="utf-8")
+              page.wait_for_timeout(3000)
               browser.close()
-
-          if not output.exists() or output.stat().st_size < 100:
-              raise SystemExit("HTML output is missing or too small")
-
-          print("Created:", output)
-          print("Size:", output.stat().st_size, "bytes")
           PY
 
           python save_page.py
 
+          # SingleFile captures the rendered page and embeds
+          # accessible resources while retaining page scripts.
+          single-file \
+            --browser-executable-path="$(which chromium || which chromium-browser || echo /usr/bin/google-chrome)" \
+            --browser-args="--no-sandbox" \
+            --browser-wait-until=networkidle \
+            --browser-wait-delay=2000 \
+            --remove-scripts=false \
+            "$PAGE_URL" download/Website.html
+
+          test -s download/Website.html
+          ls -lh download/Website.html
+
       - name: Verify HTML
         run: |
-          test -s download/Website.html
           python - <<'PY'
-          from html.parser import HTMLParser
           from pathlib import Path
+          from html.parser import HTMLParser
 
-          class CheckHTML(HTMLParser):
+          path = Path("download/Website.html")
+          data = path.read_text(encoding="utf-8", errors="replace")
+
+          class Check(HTMLParser):
               pass
 
-          file = Path("download/Website.html")
-          CheckHTML().feed(file.read_text(encoding="utf-8"))
-          print("HTML parsing passed.")
-          print(f"File size: {file.stat().st_size / 1024:.1f} KB")
+          Check().feed(data)
+
+          print("HTML parsed successfully")
+          print("Size:", round(path.stat().st_size / 1024, 1), "KB")
+          print("Script tags:", data.lower().count("<script"))
+          print("Embedded images:", data.count("data:image/"))
           PY
 
       - name: Create ZIP
@@ -192,7 +117,7 @@ jobs:
         run: |
           SAFE_NAME=$(printf '%s' "$RELEASE_NAME" |
             sed 's/[^A-Za-z0-9._-]/_/g')
-          [ -n "$SAFE_NAME" ] || SAFE_NAME="Homepage-Test"
+          [ -n "$SAFE_NAME" ] || SAFE_NAME="Website-JS-Test"
 
           mkdir -p output
           zip -j "output/${SAFE_NAME}.zip" download/Website.html
@@ -202,10 +127,9 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           RELEASE_NAME: ${{ inputs.release_name }}
         run: |
-          TAG_NAME="homepage-test-${GITHUB_RUN_ID}"
+          TAG_NAME="homepage-js-test-${GITHUB_RUN_ID}"
 
-          gh release create "$TAG_NAME" \
-            output/*.zip \
+          gh release create "$TAG_NAME" output/*.zip \
             --repo "$GITHUB_REPOSITORY" \
             --title "$RELEASE_NAME" \
-            --notes "Homepage HTML Viewer compatibility test. Extract the ZIP and open Website.html."
+            --notes "Single-file HTML test with JavaScript retained. Extract the ZIP and open Website.html."
