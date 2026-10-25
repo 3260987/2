@@ -12,6 +12,7 @@ import html as htmllib
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -90,25 +91,28 @@ def save_page(url):
     if BLOCK_IMAGES:
         cmd_base.append("--block-images")
     for attempt in (1, 2):
-        fd, tmp = tempfile.mkstemp(suffix=".html")
-        os.close(fd)
+        # Fresh EMPTY directory + a file name that does not exist yet.
+        # (single-file renames the output to "name (1).html" if the file already exists,
+        # which is what happened when the temp file was pre-created.)
+        tmpdir = tempfile.mkdtemp(prefix="sf_")
+        tmp = os.path.join(tmpdir, "page.html")
         cmd = [c.replace("{out}", tmp) for c in cmd_base]
         try:
-            r = subprocess.run(cmd, capture_output=True, text=True, timeout=240)
-            err = (r.stderr or "")[-300:]
-        except subprocess.TimeoutExpired:
-            err = "timeout"
-        try:
-            if os.path.getsize(tmp) > 0:
-                with open(tmp, "r", encoding="utf-8", errors="replace") as f:
-                    content = f.read()
-                if "<html" in content[:5000].lower() or "<html" in content.lower():
-                    return url, content
-        finally:
             try:
-                os.remove(tmp)
-            except OSError:
-                pass
+                r = subprocess.run(cmd, capture_output=True, text=True, timeout=240)
+                err = ("rc=%s | %s | %s" % (r.returncode, r.stderr or "", r.stdout or ""))[-600:]
+            except subprocess.TimeoutExpired:
+                err = "timeout"
+            # take whatever HTML file single-file produced in that directory
+            for name in sorted(os.listdir(tmpdir)):
+                path = os.path.join(tmpdir, name)
+                if os.path.isfile(path) and os.path.getsize(path) > 0:
+                    with open(path, "r", encoding="utf-8", errors="replace") as f:
+                        content = f.read()
+                    if "<html" in content.lower():
+                        return url, content
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
         print(f"  attempt {attempt} failed for {url}: {err}", flush=True)
     return url, None
 
