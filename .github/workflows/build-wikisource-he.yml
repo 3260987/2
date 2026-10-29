@@ -5,9 +5,9 @@ on:
   workflow_dispatch:
     inputs:
       zim_url:
-        description: "Direct download URL of the Hebrew Wikisource ZIM file"
-        required: true
-        default: "https://download.kiwix.org/zim/wikisource/wikisource_he_all_nopic.zim"
+        description: "Direct download URL of the Hebrew Wikisource ZIM file. Leave empty to auto-detect the current one from Kiwix's catalog."
+        required: false
+        default: ""
       part_mb:
         description: "Target size (MB) of each output HTML file"
         required: false
@@ -34,10 +34,30 @@ jobs:
           python -m pip install --upgrade pip
           pip install libzim lxml
 
+      - name: Resolve ZIM download URL
+        id: resolve
+        run: |
+          URL="${{ github.event.inputs.zim_url }}"
+          if [ -z "$URL" ]; then
+            echo "No zim_url given - looking it up in Kiwix's OPDS catalog (lang=heb, category=wikisource)..."
+            curl -sL --fail \
+              "https://library.kiwix.org/catalog/v2/entries?lang=heb&category=wikisource" \
+              -o catalog.xml
+            # the <link rel="http://opds-spec.org/acquisition" .../> entries point at .zim.meta4 files;
+            # take the first match and strip the trailing .meta4 to get the real .zim URL.
+            URL=$(grep -oE 'href="[^"]+\.zim\.meta4"' catalog.xml | head -n1 | sed -E 's/^href="//; s/\.meta4"$//')
+            if [ -z "$URL" ]; then
+              echo "::error::Could not find a Hebrew Wikisource ZIM in the Kiwix catalog. Pass --zim_url manually (browse https://library.kiwix.org/?lang=heb)."
+              exit 1
+            fi
+            echo "Resolved URL: $URL"
+          fi
+          echo "zim_url=$URL" >> "$GITHUB_OUTPUT"
+
       - name: Download ZIM file
         run: |
           mkdir -p zim
-          curl -L --fail -o zim/wikisource_he.zim "${{ github.event.inputs.zim_url }}"
+          curl -L --fail -o zim/wikisource_he.zim "${{ steps.resolve.outputs.zim_url }}"
           ls -lh zim/wikisource_he.zim
 
       - name: Run converter
@@ -71,6 +91,6 @@ jobs:
           body: |
             Static offline HTML build of Hebrew Wikisource (ויקיטקסט), generated
             automatically from the Kiwix ZIM file at:
-            ${{ github.event.inputs.zim_url }}
+            ${{ steps.resolve.outputs.zim_url }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
