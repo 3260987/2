@@ -211,20 +211,30 @@ def pass1(zim, limit):
     arc = Archive(zim)
     total = arc.entry_count
     log("ZIM entries:", total, "| new namespace scheme:", arc.has_new_namespace_scheme)
+    # libzim >=4.0.0 renamed the public accessor to get_entry_by_id() and removed
+    # the old _get_entry_by_id(); older releases only have the underscored one.
+    get_entry_by_id = getattr(arc, "get_entry_by_id", None) or arc._get_entry_by_id
     arts, reds = {}, {}
+    errors = 0
+    first_error = None
     for i in range(total):
         try:
-            e = arc._get_entry_by_id(i)
+            e = get_entry_by_id(i)
             if e.is_redirect:
                 reds[e.path] = (e.title or e.path, e.get_item().path)
             else:
                 it = e.get_item()
                 if it.mimetype.startswith("text/html"):
                     arts[e.path] = e.title or e.path.replace("_", " ")
-        except Exception:
+        except Exception as ex:
+            errors += 1
+            if first_error is None:
+                first_error = "%s: %s" % (type(ex).__name__, ex)
             continue
         if i and i % 200000 == 0:
             log("  scanned", i, "of", total, "| articles", len(arts), "redirects", len(reds))
+    if errors:
+        log("  WARNING: %d/%d entries raised an exception while scanning (first: %s)" % (errors, total, first_error))
     if limit:
         arts = dict(itertools.islice(arts.items(), limit))
     log("articles:", len(arts), "| redirects:", len(reds))
