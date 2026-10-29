@@ -1,0 +1,76 @@
+name: Build Wikisource-he static HTML
+
+# Runs manually, or you can add a schedule trigger if you want periodic rebuilds.
+on:
+  workflow_dispatch:
+    inputs:
+      zim_url:
+        description: "Direct download URL of the Hebrew Wikisource ZIM file"
+        required: true
+        default: "https://download.kiwix.org/zim/wikisource/wikisource_he_all_nopic.zim"
+      part_mb:
+        description: "Target size (MB) of each output HTML file"
+        required: false
+        default: "10"
+      zip_limit_mb:
+        description: "Start a new ZIP near this size (MB)"
+        required: false
+        default: "1900"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install libzim lxml
+
+      - name: Download ZIM file
+        run: |
+          mkdir -p zim
+          curl -L --fail -o zim/wikisource_he.zim "${{ github.event.inputs.zim_url }}"
+          ls -lh zim/wikisource_he.zim
+
+      - name: Run converter
+        run: |
+          python3 zim_to_html_wikisource_he.py \
+            --zim zim/wikisource_he.zim \
+            --workdir work \
+            --outdir output \
+            --part-mb "${{ github.event.inputs.part_mb }}" \
+            --zip-limit-mb "${{ github.event.inputs.zip_limit_mb }}" \
+            --title "ויקיטקסט העברית" \
+            --base-name Wikisource-he \
+            --zip
+
+      - name: List output
+        run: ls -lh output
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: wikisource-he-html
+          path: output/*.zip
+          retention-days: 7
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: wikisource-he-${{ github.run_number }}
+          name: "Wikisource-he (build ${{ github.run_number }})"
+          files: output/*.zip
+          body: |
+            Static offline HTML build of Hebrew Wikisource (ויקיטקסט), generated
+            automatically from the Kiwix ZIM file at:
+            ${{ github.event.inputs.zim_url }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
